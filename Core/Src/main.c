@@ -33,12 +33,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define ACC_THRESHOLD 20
+#define VEL_THRESHOLD 90
+#define AVG_COUNT 10
+#define STOP_THRESHOLD 12
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define MAG_SQ2(a,b) ((a)*(a) + (b)*(b))
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -49,7 +52,12 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 stmdev_ctx_t dev_ctx;
 int16_t data_raw_acceleration[3];
-int16_t acceleration_mg[3];
+float acceleration_mg[3];
+float acceleration_average_mg[3];
+float acceleration_deviation_mg[3];
+float velocity[2];
+float total_move[2];
+int16_t is_moving = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -61,6 +69,7 @@ static void MX_I2C2_Init(void);
 int32_t platform_write(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len);
 int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len);
 
+int32_t read_acceleration();
 
 /* USER CODE END PFP */
 
@@ -112,13 +121,13 @@ int main(void)
 
 
 
-	  uint8_t test = lsm6dsl_device_id_get(&dev_ctx, &whoAmI);
-	  if ( whoAmI != LSM6DSL_ID ) {
-		  printf("Did not recognise gyro, %i != %i; %i\r\n", whoAmI, LSM6DSL_ID, test);
-		  while(1);
-	  } else {
-		  printf("OK\r\n");
-	  }
+  uint8_t test = lsm6dsl_device_id_get(&dev_ctx, &whoAmI);
+  if ( whoAmI != LSM6DSL_ID ) {
+	  printf("Did not recognise gyro, %i != %i; %i\r\n", whoAmI, LSM6DSL_ID, test);
+	  while(1);
+  } else {
+	  printf("OK\r\n");
+  }
 
 
   /* Restore default configuration */
@@ -133,48 +142,68 @@ int main(void)
   lsm6dsl_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
 /* Set Output Data Rate */
   lsm6dsl_xl_data_rate_set(&dev_ctx, LSM6DSL_XL_ODR_12Hz5);
-  //lsm6dsl_gy_data_rate_set(&dev_ctx, LSM6DSL_GY_ODR_12Hz5);
+  lsm6dsl_gy_data_rate_set(&dev_ctx, LSM6DSL_GY_ODR_OFF);
 /* Set full scale */
   lsm6dsl_xl_full_scale_set(&dev_ctx, LSM6DSL_2g);
-  //lsm6dsl_gy_full_scale_set(&dev_ctx, LSM6DSL_2000dps);
-/* Configure filtering chain(No aux interface) */
-/* Accelerometer - analog filter */
-  lsm6dsl_xl_filter_analog_set(&dev_ctx, LSM6DSL_XL_ANA_BW_400Hz);
-/* Accelerometer - LPF1 path ( LPF2 not used )*/
-//lsm6dsl_xl_lp1_bandwidth_set(&dev_ctx, LSM6DSL_XL_LP1_ODR_DIV_4);
-/* Accelerometer - LPF1 + LPF2 path */
-  lsm6dsl_xl_lp2_bandwidth_set(&dev_ctx,
-		  LSM6DSL_XL_LOW_LAT_LP_ODR_DIV_50);
-/* Accelerometer - High Pass / Slope path */
-//lsm6dsl_xl_reference_mode_set(&dev_ctx, PROPERTY_DISABLE);
-//lsm6dsl_xl_hp_bandwidth_set(&dev_ctx, LSM6DSL_XL_HP_ODR_DIV_100);
-/* Gyroscope - filtering chain */
-  //lsm6dsl_gy_band_pass_set(&dev_ctx, LSM6DSL_HP_16mHz_LP1_LIGHT);
 
+
+  acceleration_average_mg[0] = 0;
+  acceleration_average_mg[1] = -16;
+  acceleration_average_mg[2] = 1025; // after expertimenting a bit, just starting value
+  printf("Calculating resting acceleration, do not move...\r\n");
+  for (int i = 0; i < AVG_COUNT; ++i) {
+	  while (!read_acceleration());
+	  acceleration_average_mg[i] = ((AVG_COUNT - 1) * acceleration_average_mg[i] + acceleration_mg[i]) / AVG_COUNT;
+  }
+  printf("Resting acceleration: %i\t%i\t%i\r\n", (int)acceleration_average_mg[0], (int)acceleration_average_mg[1], (int)acceleration_average_mg[2]);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  printf("Hello world!\r\n");
   while (1)
   {
-	  HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
-	  lsm6dsl_reg_t reg;
-	  lsm6dsl_status_reg_get(&dev_ctx, &reg.status_reg);
+	  // MOVE MOUSE: (smoothly)
 
-	  if (reg.status_reg.xlda) {
-		/* Read magnetic field data */
-		memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
-		lsm6dsl_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-		acceleration_mg[0] = lsm6dsl_from_fs2g_to_mg(
-							   data_raw_acceleration[0]);
-		acceleration_mg[1] = lsm6dsl_from_fs2g_to_mg(
-							   data_raw_acceleration[1]);
-		acceleration_mg[2] = lsm6dsl_from_fs2g_to_mg(
-							   data_raw_acceleration[2]);
-		printf("Acceleration [mg]:%i\t%i\t%i\r\n",
-				acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
-		//tx_com( tx_buffer, strlen( (char const *)tx_buffer ) );
+	  if (!read_acceleration()) {
+		  continue;
+	  }
+	  for (int i = 0; i < 3; ++i) {
+		// CALCULATE ACCELERATION DEVIATION
+		acceleration_deviation_mg[i] = acceleration_mg[i] - acceleration_average_mg[i];
+	  }
+	  /*printf("Acceleration [mg]:%i\t%i\t%i\t(%i\t%i\t%i)\r\n",
+			  (int)acceleration_deviation_mg[0], (int)acceleration_deviation_mg[1], (int)acceleration_deviation_mg[2],
+			  (int)acceleration_mg[0], (int)acceleration_mg[1], (int)acceleration_mg[2]);*/
+	  if (is_moving) {
+		  // MOVING LOOP
+		  printf("Velocity [mg * frames]: %i\t%i\r\n", (int)velocity[0], (int)velocity[1]);
+		  velocity[0] += acceleration_deviation_mg[0];
+		  velocity[1] += acceleration_deviation_mg[1];
+		  ++is_moving;
+		  total_move[0] += velocity[0];
+		  total_move[1] += velocity[1];
+		  if (MAG_SQ2(acceleration_deviation_mg[0], acceleration_deviation_mg[1]) < ACC_THRESHOLD
+				  && MAG_SQ2(velocity[0], velocity[1]) < VEL_THRESHOLD * VEL_THRESHOLD) {
+			  is_moving = 0;
+			  printf("STOP MOVING\r\n");
+			  printf("TOTAL MOVE: %i\t%i\r\n", (int)total_move[0], (int)total_move[1]);
+		  }
+		  if (is_moving > STOP_THRESHOLD) {
+			  printf("BADBADBAD---");
+			  is_moving = 0;
+			  printf("STOP MOVING\r\n");
+			  printf("TOTAL MOVE: %i\t%i\r\n", (int)total_move[0], (int)total_move[1]);
+		  }
+	  } else {
+		  if (MAG_SQ2(acceleration_deviation_mg[0],acceleration_deviation_mg[1]) > ACC_THRESHOLD * ACC_THRESHOLD) {
+			  // START MOVING LOOP
+			  printf("START MOVING\r\n");
+			  total_move[0] = 0;
+			  total_move[1] = 0;
+			  is_moving = 1;
+			  velocity[0] = acceleration_deviation_mg[0];
+			  velocity[1] = acceleration_deviation_mg[1];
+		  }
 	  }
     /* USER CODE END WHILE */
 
@@ -368,6 +397,25 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+int32_t read_acceleration() {
+	// READ ACCELERATION
+	lsm6dsl_reg_t reg;
+	lsm6dsl_status_reg_get(&dev_ctx, &reg.status_reg);
+	// ACCELERATION NOT READY
+	if (!reg.status_reg.xlda) {
+		return 0;
+	}
+	/* Read magnetic field data */
+	memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
+	lsm6dsl_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+	acceleration_mg[0] = lsm6dsl_from_fs2g_to_mg(
+				   data_raw_acceleration[0]);
+	acceleration_mg[1] = lsm6dsl_from_fs2g_to_mg(
+				   data_raw_acceleration[1]);
+	acceleration_mg[2] = lsm6dsl_from_fs2g_to_mg(
+				   data_raw_acceleration[2]);
+	return 1;
+}
 /*
  * Write a register from the LSM6DSL sensor
  * @brief  Read generic device register (platform dependent)
