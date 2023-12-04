@@ -18,17 +18,26 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "lsm6dsl_reg.h"
 #include "helper_functions.h"
 #include <string.h>
+#include "usbd_hid.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef struct
+{
+	uint8_t button;
+	int8_t mouse_x;
+	int8_t mouse_y;
+	int8_t mouse_z;
+} mouseID;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -36,7 +45,7 @@
 #define ACC_THRESHOLD 20
 #define VEL_THRESHOLD 90
 #define AVG_COUNT 10
-#define STOP_THRESHOLD 12
+#define STOP_THRESHOLD 100
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,6 +59,7 @@ I2C_HandleTypeDef hi2c2;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+extern USBD_HandleTypeDef hUsbDeviceFS;
 stmdev_ctx_t dev_ctx;
 int16_t data_raw_acceleration[3];
 float acceleration_mg[3];
@@ -58,6 +68,8 @@ float acceleration_deviation_mg[3];
 float velocity[2];
 float total_move[2];
 int16_t is_moving = 0;
+
+mouseID mouseid = {0,0,0,0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -108,6 +120,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_I2C2_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
   /* Initialize lsm6dsl driver */
@@ -141,7 +154,7 @@ int main(void)
   /* Enable Block Data Update */
   lsm6dsl_block_data_update_set(&dev_ctx, PROPERTY_ENABLE);
 /* Set Output Data Rate */
-  lsm6dsl_xl_data_rate_set(&dev_ctx, LSM6DSL_XL_ODR_12Hz5);
+  lsm6dsl_xl_data_rate_set(&dev_ctx, LSM6DSL_XL_ODR_104Hz);
   lsm6dsl_gy_data_rate_set(&dev_ctx, LSM6DSL_GY_ODR_OFF);
 /* Set full scale */
   lsm6dsl_xl_full_scale_set(&dev_ctx, LSM6DSL_2g);
@@ -358,6 +371,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
