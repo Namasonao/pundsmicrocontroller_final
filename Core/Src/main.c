@@ -42,10 +42,12 @@ typedef struct
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ACC_THRESHOLD 20
-#define VEL_THRESHOLD 90
-#define AVG_COUNT 10
-#define STOP_THRESHOLD 100
+#define ACC_THRESHOLD 35
+#define VEL_THRESHOLD 200
+#define AVG_COUNT 20
+#define STOP_THRESHOLD 70
+#define COOL_DOWN 15
+#define VEL2MOUSE 0.01
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,6 +61,7 @@ I2C_HandleTypeDef hi2c2;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+volatile int btn_flag = 0;
 extern USBD_HandleTypeDef hUsbDeviceFS;
 stmdev_ctx_t dev_ctx;
 int16_t data_raw_acceleration[3];
@@ -68,8 +71,9 @@ float acceleration_deviation_mg[3];
 float velocity[2];
 float total_move[2];
 int16_t is_moving = 0;
+int16_t cooldown = 0;
 
-mouseID mouseid = {0,0,0,0};
+mouseID mouseid;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -164,11 +168,11 @@ int main(void)
   acceleration_average_mg[1] = -16;
   acceleration_average_mg[2] = 1025; // after expertimenting a bit, just starting value
   printf("Calculating resting acceleration, do not move...\r\n");
-  for (int i = 0; i < AVG_COUNT; ++i) {
-	  while (!read_acceleration());
-	  acceleration_average_mg[i] = ((AVG_COUNT - 1) * acceleration_average_mg[i] + acceleration_mg[i]) / AVG_COUNT;
-  }
+  calibrate_gy();
   printf("Resting acceleration: %i\t%i\t%i\r\n", (int)acceleration_average_mg[0], (int)acceleration_average_mg[1], (int)acceleration_average_mg[2]);
+  mouseid.mouse_x = 0;
+  mouseid.mouse_y = 0;
+  mouseid.mouse_z = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -177,11 +181,28 @@ int main(void)
   {
 	  // MOVE MOUSE: (smoothly)
 
+	  if(btn_flag == 1)
+	  {
+		  printf("mouseid: button %i x %i y %i z %i\r\n", mouseid.button, mouseid.mouse_x, mouseid.mouse_y, mouseid.mouse_z);
+		  btn_flag = 0;
+		  mouseid.button = 1; // left click = 1
+		  if (USBD_HID_SendReport(&hUsbDeviceFS, &mouseid, sizeof(mouseid))) {
+			  printf("Error\r\n");
+		  }
+		  HAL_Delay(20);
+		  mouseid.button = 0; // left click = 1
+		  USBD_HID_SendReport(&hUsbDeviceFS, &mouseid, sizeof(mouseid));
+	  }
+
 	  if (!read_acceleration()) {
 		  continue;
 	  }
 	  for (int i = 0; i < 3; ++i) {
 		// CALCULATE ACCELERATION DEVIATION
+		if (!is_moving) {
+			acceleration_average_mg[i] = ((AVG_COUNT - 1) * acceleration_average_mg[i] + acceleration_mg[i]) / AVG_COUNT;
+		}
+
 		acceleration_deviation_mg[i] = acceleration_mg[i] - acceleration_average_mg[i];
 	  }
 	  /*printf("Acceleration [mg]:%i\t%i\t%i\t(%i\t%i\t%i)\r\n",
@@ -190,22 +211,32 @@ int main(void)
 	  if (is_moving) {
 		  // MOVING LOOP
 		  printf("Velocity [mg * frames]: %i\t%i\r\n", (int)velocity[0], (int)velocity[1]);
+		  mouseid.mouse_x = (int) (-VEL2MOUSE * velocity[1]);
+		  mouseid.mouse_y = (int) (-VEL2MOUSE * velocity[0]);
+		  mouseid.button = 0;
+		  USBD_HID_SendReport(&hUsbDeviceFS, &mouseid, sizeof(mouseid));
 		  velocity[0] += acceleration_deviation_mg[0];
 		  velocity[1] += acceleration_deviation_mg[1];
 		  ++is_moving;
 		  total_move[0] += velocity[0];
 		  total_move[1] += velocity[1];
-		  if (MAG_SQ2(acceleration_deviation_mg[0], acceleration_deviation_mg[1]) < ACC_THRESHOLD
+		  if (is_moving >= 3
 				  && MAG_SQ2(velocity[0], velocity[1]) < VEL_THRESHOLD * VEL_THRESHOLD) {
 			  is_moving = 0;
 			  printf("STOP MOVING\r\n");
 			  printf("TOTAL MOVE: %i\t%i\r\n", (int)total_move[0], (int)total_move[1]);
+			  cooldown = 1;
 		  }
 		  if (is_moving > STOP_THRESHOLD) {
 			  printf("BADBADBAD---");
 			  is_moving = 0;
 			  printf("STOP MOVING\r\n");
 			  printf("TOTAL MOVE: %i\t%i\r\n", (int)total_move[0], (int)total_move[1]);
+		  }
+	  } else if (cooldown) {
+		  ++cooldown;
+		  if (cooldown > COOL_DOWN) {
+			  cooldown = 0;
 		  }
 	  } else {
 		  if (MAG_SQ2(acceleration_deviation_mg[0],acceleration_deviation_mg[1]) > ACC_THRESHOLD * ACC_THRESHOLD) {
@@ -410,6 +441,14 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	if (GPIO_Pin == USER_BUTTON_Pin) {
+		printf("Button pressed \r\n");
+		HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+		//HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+		btn_flag = 1;
+	}
+}
 
 int32_t read_acceleration() {
 	// READ ACCELERATION
@@ -464,6 +503,13 @@ int32_t platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len){
 
     }
     return ret;
+}
+
+void calibrate_gy() {
+	for (int i = 0; i < AVG_COUNT; ++i) {
+	  while (!read_acceleration());
+	  acceleration_average_mg[i] = ((AVG_COUNT - 1) * acceleration_average_mg[i] + acceleration_mg[i]) / AVG_COUNT;
+	}
 }
 /* USER CODE END 4 */
 
